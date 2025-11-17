@@ -23,6 +23,7 @@ function getCanvas() {
   try {
     return document.querySelector("canvas");
   } catch (e) {
+    console.error("getCanvas error", e);
     return null;
   }
 }
@@ -42,11 +43,13 @@ function getCanvasColors() {
       const d = ctx.getImageData(0, 0, 1, 1).data;
       if (d && d.length >= 3) out.bg = `rgb(${d[0]},${d[1]},${d[2]})`;
     } catch (e) {
+      console.error("getCanvasColors getImageData error", e);
       // getImageData can fail for CORS; fall back to computed style
       try {
         const cs = window.getComputedStyle && window.getComputedStyle(canvas);
         out.bg = cs && cs.backgroundColor ? cs.backgroundColor : null;
       } catch (ee) {
+        console.error("getCanvasColors computedStyle error", ee);
         out.bg = null;
       }
     }
@@ -184,11 +187,27 @@ function saveDXF(name) {
     // Try to produce an SVG by running the sketch in SVG mode
     const prev = { svgElmt: window.svgElmt, _SVG_: window._SVG_ };
     try {
+      // Turn on SVG mode and create a temporary svg element.
+      // Many sketches record drawing output commands in `OUTPUT` and
+      // provide a `TRACE2()` helper (from `init_trace.js`) that will
+      // replay `OUTPUT` into the current `svgElmt`. Call it so the
+      // temporary SVG is actually populated with polylines/polygons.
       window._SVG_ = true;
       const temp = ensureTempSvg(np);
       window.svgElmt = temp;
       if (!window.svgTranslate) window.svgTranslate = { x: 0, y: 0 };
 
+      // If TRACE2 is available (init_trace.js), use it to populate
+      // the temporary svg from the recorded `OUTPUT` commands.
+      try {
+        if (typeof TRACE2 === "function") {
+          TRACE2();
+        }
+      } catch (e) {
+        console.error("saveDXF: TRACE2 playback error", e);
+      }
+
+      // Now extract polylines/polygons from the populated temp svg
       shapes = extractPolylines(temp);
     } finally {
       window.svgElmt = prev.svgElmt;

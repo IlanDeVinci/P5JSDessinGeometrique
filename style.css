@@ -6,3 +6,9 @@ body {
 canvas {
   display: block;
 }
+/* controls simply positioned to the right */
+#controls {
+  position: fixed;
+  top: 10px;
+  right: 10px;
+}

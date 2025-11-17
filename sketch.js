@@ -3,15 +3,13 @@ let centerX = NP / 2; // centre X du canevas
 let centerY = NP / 2; // centre Y du canevas
 
 function setup() {
-  createCanvas(NP, NP); // crée un canevas de 800x800 pixels
-  background(255); // fond blanc
-  stroke(125, 0, 100); // de 0 à (125, 0, 100) : Change la couleur de la courbe de noir à mauve
+  INIT(); // init_trace : crée un canevas de 800x800 pixels
+  background_(255); // fond blanc
+  stroke_([125, 0, 100]); // de 0 à (125, 0, 100) : Change la couleur de la courbe de noir à mauve
   strokeWeight(1);
-  noFill();
+  noFill_();
 
   drawCourbesTournantes();
-
-  noLoop(); // empêche de s'éxécuter en boucle
 }
 
 function drawCourbesTournantes() {
@@ -25,7 +23,7 @@ function drawCourbesTournantes() {
   let R1 = NP / 10; // de NP/7 à NP/10 : Réduit le rayon de la courbe pour qu'elle tienne dans le canevas
   let R2 = NP / 5; // de NP/4 à NP/5 : Réduit le rayon des oscillations pour une courbe plus compacte
 
-  beginShape();
+  beginShape_();
   for (let i = 0; i <= N; i++) {
     let AN = (TWO_PI * i) / N;
     let S = 1 + 0.25 * sin(AN * 5); // de S = 1 à S = 1 + 0.2 * sin(AN * 5) : Ajoute une variation dynamique au rayon des oscillations pour une forme moins symmétrique
@@ -37,7 +35,7 @@ function drawCourbesTournantes() {
     let r2s = R2 * S;
     let x = centerX + R1 * C1 + r2s * (C1 * C2 - S1 * S2);
     let y = centerY + R1 * S1 + r2s * (S1 * C2 + C1 * S2);
-    vertex(x, y);
+    vertex_(x, y);
   }
-  endShape();
+  endShape_();
 }

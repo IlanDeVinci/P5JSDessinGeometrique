@@ -1,4 +1,4 @@
-# P5JSCours
+# P5JS Dessin Géométrique
 
 P5.js Dessin Géométrique.
 

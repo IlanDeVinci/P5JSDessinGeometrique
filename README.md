@@ -2,4 +2,4 @@
 
 P5.js Dessin Géométrique.
 
-Ouvrir le fichier index.html pour voir le sketch.
+Ouvrir le fichier [index.html](https://ilandevinci.github.io/P5JSDessinGeometrique/) pour voir le sketch.

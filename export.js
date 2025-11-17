@@ -80,6 +80,7 @@ function ensureTempSvg(np) {
 
 // --- Exporters ---
 function savePNG(name) {
+  if (typeof save_ === "function") save_(name || "sketch.png");
   // Prefer exporting from the visible canvas if present
   const canvas = getCanvas();
   if (canvas && canvas.toBlob) {
@@ -89,7 +90,6 @@ function savePNG(name) {
     });
     return;
   }
-  if (typeof save_ === "function") save_(name || "sketch.png");
 }
 
 function saveSVG(name) {

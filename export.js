@@ -392,15 +392,6 @@ function saveSVG(name) {
           pageSvg.id = "export-svg-overlay";
           // style reset: make it fill the original canvas element slot
           pageSvg.style.display = "block";
-          // match the canvas CSS size so layout is preserved
-          const r = canvasEl ? canvasEl.getBoundingClientRect() : null;
-          if (r) {
-            pageSvg.style.width = `${Math.round(r.width * 2)}px`;
-            pageSvg.style.height = `${Math.round(r.height * 2)}px`;
-          } else {
-            pageSvg.style.width = pageSvg.getAttribute("width") || "100%";
-            pageSvg.style.height = pageSvg.getAttribute("height") || "100%";
-          }
 
           if (canvasEl && canvasEl.parentNode) {
             canvasEl.parentNode.replaceChild(pageSvg, canvasEl);

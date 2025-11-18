@@ -103,7 +103,7 @@ function normalizeColor(c) {
 }
 
 // Create a minimal temporary SVG with white background sized to `np`
-function ensureTempSvg(np) {
+function ensureTempSvg(np, bgColor) {
   const SVG_NS = "http://www.w3.org/2000/svg";
   const svg = document.createElementNS(SVG_NS, "svg");
   svg.setAttribute("xmlns", SVG_NS);
@@ -111,9 +111,53 @@ function ensureTempSvg(np) {
   const bg = document.createElementNS(SVG_NS, "rect");
   bg.setAttribute("width", String(np));
   bg.setAttribute("height", String(np));
-  bg.setAttribute("fill", "#ffffff");
+  const fill =
+    bgColor !== undefined && bgColor !== null
+      ? String(bgColor)
+      : window.BG_COLOR || "#ffffff";
+  bg.setAttribute("fill", fill);
   svg.appendChild(bg);
   return svg;
+}
+
+// Ensure an SVG element has explicit `width`/`height` and `viewBox` that
+// match the pixel dimensions of the provided canvas element. If no canvas
+// is provided, fall back to `np` for sizing.
+function setSvgSize(svg, canvasEl, np) {
+  try {
+    // Prefer CSS style width/height (px) on the canvas created by p5.js,
+    // because p5 often sets `width`/`height` attributes for device pixels
+    // while the CSS `style` contains the logical display size (e.g. 480x750).
+    let w = np;
+    let h = np;
+    if (canvasEl) {
+      try {
+        const cs = window.getComputedStyle && window.getComputedStyle(canvasEl);
+        if (cs && cs.width && cs.width.endsWith("px"))
+          w = Math.round(parseFloat(cs.width));
+        else if (canvasEl.width) w = canvasEl.width;
+        else if (canvasEl.getBoundingClientRect)
+          w = Math.round(canvasEl.getBoundingClientRect().width);
+      } catch (e) {
+        if (canvasEl.width) w = canvasEl.width;
+      }
+      try {
+        const cs = window.getComputedStyle && window.getComputedStyle(canvasEl);
+        if (cs && cs.height && cs.height.endsWith("px"))
+          h = Math.round(parseFloat(cs.height));
+        else if (canvasEl.height) h = canvasEl.height;
+        else if (canvasEl.getBoundingClientRect)
+          h = Math.round(canvasEl.getBoundingClientRect().height);
+      } catch (e) {
+        if (canvasEl.height) h = canvasEl.height;
+      }
+    }
+    if (w) svg.setAttribute("width", String(w));
+    if (h) svg.setAttribute("height", String(h));
+    if (w && h) svg.setAttribute("viewBox", `0 0 ${w} ${h}`);
+  } catch (e) {
+    /* ignore */
+  }
 }
 
 // --- Exporters ---
@@ -135,12 +179,57 @@ function saveSVG(name) {
   const prev = { svgElmt: window.svgElmt, _SVG_: window._SVG_ };
   try {
     const canvasColors = getCanvasColors();
+    const canvasBg = canvasColors.bg || window.BG_COLOR || "#ffffff";
+    // Capture the canvas element and its intrinsic pixel size once so we
+    // continue to use the correct dimensions even if the canvas is later
+    // replaced in the DOM by a temporary SVG overlay.
+    const canvasEl = getCanvas();
+    // Prefer CSS style width/height (px) when present (p5 sets these on the
+    // canvas element). Fall back to intrinsic attributes or bounding rect.
+    let canvasW = np;
+    let canvasH = np;
+    if (canvasEl) {
+      try {
+        const cs = window.getComputedStyle && window.getComputedStyle(canvasEl);
+        if (cs && cs.width && cs.width.endsWith("px"))
+          canvasW = Math.round(parseFloat(cs.width));
+        else if (canvasEl.width) canvasW = canvasEl.width;
+        else if (canvasEl.getBoundingClientRect)
+          canvasW = Math.round(canvasEl.getBoundingClientRect().width);
+      } catch (e) {
+        if (canvasEl.width) canvasW = canvasEl.width;
+      }
+      try {
+        const cs = window.getComputedStyle && window.getComputedStyle(canvasEl);
+        if (cs && cs.height && cs.height.endsWith("px"))
+          canvasH = Math.round(parseFloat(cs.height));
+        else if (canvasEl.height) canvasH = canvasEl.height;
+        else if (canvasEl.getBoundingClientRect)
+          canvasH = Math.round(canvasEl.getBoundingClientRect().height);
+      } catch (e) {
+        if (canvasEl.height) canvasH = canvasEl.height;
+      }
+    }
 
     // If a vector `window.svgElmt` is available, clone and normalize attributes
     if (window.svgElmt) {
       const temp = window.svgElmt.cloneNode(true);
       if (!temp.getAttribute("viewBox"))
         temp.setAttribute("viewBox", `0 0 ${np} ${np}`);
+      // Ensure there is a background rect matching the canvas or BG_COLOR
+      try {
+        let bgRect = temp.querySelector("rect");
+        if (!bgRect) {
+          const SVG_NS = "http://www.w3.org/2000/svg";
+          bgRect = document.createElementNS(SVG_NS, "rect");
+          bgRect.setAttribute("width", String(canvasW));
+          bgRect.setAttribute("height", String(canvasH));
+          temp.insertBefore(bgRect, temp.firstChild);
+        }
+        bgRect.setAttribute("fill", String(canvasBg));
+      } catch (e) {
+        /* ignore background rect manipulation errors */
+      }
       try {
         const shapes = temp.querySelectorAll("polyline,polygon");
         const defaultStroke =
@@ -157,6 +246,12 @@ function saveSVG(name) {
         });
       } catch (e) {
         console.error("saveSVG: error normalizing existing svgElmt", e);
+      }
+      // Make sure exported SVG dimensions match the canvas
+      try {
+        setSvgSize(temp, canvasEl, np);
+      } catch (e) {
+        /* ignore */
       }
       dl(
         name || "sketch.svg",
@@ -311,7 +406,17 @@ function saveSVG(name) {
       }
     };
 
-    const temp = ensureTempSvg(np);
+    const temp = ensureTempSvg(np, canvasBg);
+    // Ensure the temp SVG's background rect uses the canvas pixel size
+    try {
+      const bgRect0 = temp.querySelector("rect");
+      if (bgRect0) {
+        bgRect0.setAttribute("width", String(canvasW));
+        bgRect0.setAttribute("height", String(canvasH));
+      }
+    } catch (e) {
+      /* ignore */
+    }
     const populated = tryPopulateSvg(temp);
     // populated: { shapes: NodeList, svg: SVGElement }
     let shapes = populated && populated.shapes ? populated.shapes : null;
@@ -361,25 +466,25 @@ function saveSVG(name) {
         // to replace the canvas in-place.
         const exportClone = exportSvg.cloneNode(true);
         try {
-          const bgRect = exportClone.querySelector("rect");
-          if (bgRect) bgRect.parentNode.removeChild(bgRect);
+          // Ensure exported clone has a background rect matching canvasBg.
+          let bgRect = exportClone.querySelector("rect");
+          if (!bgRect) {
+            const SVG_NS = "http://www.w3.org/2000/svg";
+            bgRect = document.createElementNS(SVG_NS, "rect");
+            bgRect.setAttribute("width", String(canvasW));
+            bgRect.setAttribute("height", String(canvasH));
+            exportClone.insertBefore(bgRect, exportClone.firstChild);
+          }
+          bgRect.setAttribute("fill", String(canvasBg));
         } catch (e) {
           /* ignore */
         }
 
-        // Ensure exported SVG has explicit width/height matching the canvas
-        const canvasEl = getCanvas();
-        if (canvasEl) {
-          const w =
-            canvasEl.width ||
-            Math.round(canvasEl.getBoundingClientRect().width);
-          const h =
-            canvasEl.height ||
-            Math.round(canvasEl.getBoundingClientRect().height);
-          if (w) exportClone.setAttribute("width", String(w));
-          if (h) exportClone.setAttribute("height", String(h));
-          // set viewBox to match intrinsic pixel size so scaling is correct
-          if (w && h) exportClone.setAttribute("viewBox", `0 0 ${w} ${h}`);
+        // Ensure exported SVG has explicit width/height/viewBox matching the canvas
+        try {
+          setSvgSize(exportClone, canvasEl, np);
+        } catch (e) {
+          /* ignore */
         }
         // remove any inline style that could add background or sizing
         try {
@@ -413,8 +518,6 @@ function saveSVG(name) {
     }
 
     // Fallback: embed raster canvas into an SVG
-    const canvasBg =
-      (canvasColors && canvasColors.bg) || window.BG_COLOR || "#ffffff";
     try {
       const bgRect = temp.querySelector("rect");
       if (bgRect) bgRect.setAttribute("fill", canvasBg);
@@ -431,14 +534,19 @@ function saveSVG(name) {
           "image"
         );
         img.setAttributeNS("http://www.w3.org/1999/xlink", "href", dataUrl);
-        img.setAttribute("width", String(np));
-        img.setAttribute("height", String(np));
+        img.setAttribute("width", String(canvasW));
+        img.setAttribute("height", String(canvasH));
         temp.appendChild(img);
       } catch (e) {
         console.error("saveSVG: error embedding canvas dataURL", e);
       }
     }
 
+    try {
+      setSvgSize(temp, canvasEl, np);
+    } catch (e) {
+      /* ignore */
+    }
     dl(name || "sketch.svg", serializeSvg(temp), "image/svg+xml;charset=utf-8");
   } finally {
     window.svgElmt = prev.svgElmt;

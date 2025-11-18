@@ -1,6 +1,15 @@
 let NP = 800; // de 580 à 800 : Taille du canevas augmentée pour mieux voir les détails
 let centerX = NP / 2; // centre X du canevas
 let centerY = NP / 2; // centre Y du canevas
+let N = 10000; // de 2000 à 10000 : Plus grand nombre de points pour une courbe plus lisse
+let T1 = -0.5; // de 0.5 à -0.5 : Inverse le sens de rotation de la courbe
+let T2 = 100; // de 50 à 100 : Augmente la densité de la courbe
+let H1 = 3, // de 2 à 3 : Change la forme globale de la courbe
+  H2 = 2;
+let K1 = 1.5, // de 1 à 1.5 : Change les oscillations de la courbe
+  K2 = 3; // de 2 à 3 : Change les oscillations de la courbe
+let R1 = NP / 10; // de NP/7 à NP/10 : Réduit le rayon de la courbe pour qu'elle tienne dans le canevas
+let R2 = NP / 5; // de NP/4 à NP/5 : Réduit le rayon des oscillations pour une courbe plus compacte
 
 function setup() {
   INIT(); // init_trace : crée un canevas de 800x800 pixels
@@ -8,20 +17,6 @@ function setup() {
   stroke_([125, 0, 100]); // de 0 à (125, 0, 100) : Change la couleur de la courbe de noir à mauve
   strokeWeight(1);
   noFill_();
-
-  drawCourbesTournantes();
-}
-
-function drawCourbesTournantes() {
-  let N = 10000; // de 2000 à 10000 : Plus grand nombre de points pour une courbe plus lisse
-  let T1 = -0.5; // de 0.5 à -0.5 : Inverse le sens de rotation de la courbe
-  let T2 = 100; // de 50 à 100 : Augmente la densité de la courbe
-  let H1 = 3, // de 2 à 3 : Change la forme globale de la courbe
-    H2 = 2;
-  let K1 = 1.5, // de 1 à 1.5 : Change les oscillations de la courbe
-    K2 = 3; // de 2 à 3 : Change les oscillations de la courbe
-  let R1 = NP / 10; // de NP/7 à NP/10 : Réduit le rayon de la courbe pour qu'elle tienne dans le canevas
-  let R2 = NP / 5; // de NP/4 à NP/5 : Réduit le rayon des oscillations pour une courbe plus compacte
 
   beginShape_();
   for (let i = 0; i <= N; i++) {

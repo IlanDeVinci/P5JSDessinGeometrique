@@ -23,7 +23,6 @@ function getCanvas() {
   try {
     return document.querySelector("canvas");
   } catch (e) {
-    console.error("getCanvas error", e);
     return null;
   }
 }
@@ -43,13 +42,11 @@ function getCanvasColors() {
       const d = ctx.getImageData(0, 0, 1, 1).data;
       if (d && d.length >= 3) out.bg = `rgb(${d[0]},${d[1]},${d[2]})`;
     } catch (e) {
-      console.error("getCanvasColors getImageData error", e);
       // getImageData can fail for CORS; fall back to computed style
       try {
         const cs = window.getComputedStyle && window.getComputedStyle(canvas);
         out.bg = cs && cs.backgroundColor ? cs.backgroundColor : null;
       } catch (ee) {
-        console.error("getCanvasColors computedStyle error", ee);
         out.bg = null;
       }
     }
@@ -65,10 +62,51 @@ function serializeSvg(node) {
   return preface + new XMLSerializer().serializeToString(node);
 }
 
+// Normalize various color inputs to an SVG-friendly string.
+// Accepts arrays like [r,g,b], hex strings, or CSS `rgb(...)`/`rgba(...)`.
+function normalizeColor(c) {
+  if (!c && c !== 0) return null;
+  if (Array.isArray(c)) {
+    const [r, g, b] = c.map((v) =>
+      Math.max(0, Math.min(255, parseInt(v) || 0))
+    );
+    return `rgb(${r},${g},${b})`;
+  }
+  if (typeof c === "string") {
+    const s = c.trim();
+    // bare numeric CSV like "125,0,100"
+    if (/^\s*\d+\s*,\s*\d+\s*,\s*\d+\s*$/.test(s)) {
+      const parts = s.split(/\s*,\s*/).map((p) => parseInt(p) || 0);
+      return `rgb(${parts[0]},${parts[1]},${parts[2]})`;
+    }
+    // already rgb/rgba
+    if (/^rgba?\(/i.test(s)) {
+      // if rgba, drop alpha for SVG stroke
+      const m = s.match(/^rgba?\(([^)]+)\)/i);
+      if (m && m[1]) {
+        const parts = m[1].split(",").map((p) => p.trim());
+        return `rgb(${parts[0]},${parts[1] || 0},${parts[2] || 0})`;
+      }
+      return s;
+    }
+    // hex-like
+    if (/^#([0-9a-f]{3}|[0-9a-f]{6})$/i.test(s)) return s.toLowerCase();
+    // fallback: return original string
+    return s;
+  }
+  // number? treat as gray
+  if (typeof c === "number") {
+    const v = Math.max(0, Math.min(255, parseInt(c) || 0));
+    return `rgb(${v},${v},${v})`;
+  }
+  return null;
+}
+
 // Create a minimal temporary SVG with white background sized to `np`
 function ensureTempSvg(np) {
   const SVG_NS = "http://www.w3.org/2000/svg";
   const svg = document.createElementNS(SVG_NS, "svg");
+  svg.setAttribute("xmlns", SVG_NS);
   svg.setAttribute("viewBox", `0 0 ${np} ${np}`);
   const bg = document.createElementNS(SVG_NS, "rect");
   bg.setAttribute("width", String(np));
@@ -80,7 +118,6 @@ function ensureTempSvg(np) {
 
 // --- Exporters ---
 function savePNG(name) {
-  if (typeof save_ === "function") save_(name || "sketch.png");
   // Prefer exporting from the visible canvas if present
   const canvas = getCanvas();
   if (canvas && canvas.toBlob) {
@@ -90,6 +127,7 @@ function savePNG(name) {
     });
     return;
   }
+  if (typeof save_ === "function") save_(name || "sketch.png");
 }
 
 function saveSVG(name) {
@@ -105,11 +143,15 @@ function saveSVG(name) {
         temp.setAttribute("viewBox", `0 0 ${np} ${np}`);
       try {
         const shapes = temp.querySelectorAll("polyline,polygon");
+        const defaultStroke =
+          normalizeColor(canvasColors.strokeStyle) || canvasColors.strokeStyle;
         shapes.forEach((n) => {
           const stroke = n.getAttribute("stroke");
           if (!stroke || stroke === "null" || stroke === "undefined") {
-            if (canvasColors.strokeStyle)
-              n.setAttribute("stroke", canvasColors.strokeStyle);
+            if (defaultStroke) n.setAttribute("stroke", defaultStroke);
+          } else {
+            const norm = normalizeColor(stroke);
+            if (norm) n.setAttribute("stroke", norm);
           }
           if (!n.getAttribute("fill")) n.setAttribute("fill", "none");
         });
@@ -124,8 +166,262 @@ function saveSVG(name) {
       return;
     }
 
-    // Fallback: embed raster canvas into an SVG
+    // If no vector svgElmt exists, try to populate a temporary SVG by
+    // replaying recorded output or re-running the sketch drawing function.
+    const tryPopulateSvg = (temp) => {
+      const prev2 = {
+        svgElmt: window.svgElmt,
+        _SVG_: window._SVG_,
+        INIT: window.INIT,
+        INIT2: window.INIT2,
+        INIT_WH: window.INIT_WH,
+        noCanvas: window.noCanvas,
+        createCanvas: window.createCanvas,
+        svgStrokeColor: window.svgStrokeColor,
+      };
+      let createdSvg = null;
+      try {
+        // Force SVG mode and root to our temporary svg while invoking sketch code.
+        window._SVG_ = true;
+        window.svgElmt = temp;
+        if (!window.svgTranslate) window.svgTranslate = { x: 0, y: 0 };
+
+        // Prevent the sketch from removing the existing canvas when it calls
+        // `noCanvas()` during INIT; monkey-patch `noCanvas` and `createCanvas`
+        // temporarily so the visible bitmap is preserved.
+        try {
+          window.noCanvas = function () {};
+          window.createCanvas = function (w, h) {
+            // return existing canvas if available
+            return document.querySelector("canvas") || null;
+          };
+        } catch (e) {
+          console.error("saveSVG: error patching noCanvas/createCanvas", e);
+        }
+
+        // Ensure INIT / INIT2 used by sketches will create SVGs attached to
+        // our temporary mode (or at least create an svg we can capture).
+        try {
+          if (typeof window.INIT === "function") {
+            const origINIT = window.INIT;
+            window.INIT = function (opts = {}) {
+              opts = opts || {};
+              opts.svg = true;
+              return origINIT.call(this, opts);
+            };
+          }
+          if (typeof window.INIT2 === "function") {
+            const origINIT2 = window.INIT2;
+            window.INIT2 = function (h, opts = {}) {
+              opts = opts || {};
+              opts.svg = true;
+              return origINIT2.call(this, h, opts);
+            };
+          }
+          if (typeof window.INIT_WH === "function") {
+            const origINIT_WH = window.INIT_WH;
+            window.INIT_WH = function (w, h, opts = {}) {
+              opts = opts || {};
+              opts.svg = true;
+              return origINIT_WH.call(this, w, h, opts);
+            };
+          }
+        } catch (e) {
+          console.error("saveSVG: error patching INIT functions", e);
+        }
+
+        // Make sure traced shapes use the same stroke color as the canvas
+        try {
+          const cs = getCanvasColors();
+          const candidate =
+            (cs && cs.strokeStyle) ||
+            window.STROKE_COLOR ||
+            window.svgStrokeColor;
+          const norm = normalizeColor(candidate) || candidate;
+          if (norm) window.svgStrokeColor = norm;
+        } catch (e) {
+          /* ignore */
+        }
+
+        // 1) If the sketch records OUTPUT and provides TRACE2(), use it.
+        try {
+          if (typeof TRACE2 === "function") TRACE2();
+        } catch (e) {
+          console.error("saveSVG: TRACE2 playback error", e);
+        }
+
+        // 2) If nothing was produced, try calling common drawing entrypoints
+        // that sketches may define. Call in order: draw_(), draw(), setup().
+        let shapes = temp.querySelectorAll("polyline,polygon");
+        if (!shapes || shapes.length === 0) {
+          try {
+            if (typeof window.draw_ === "function") window.draw_();
+            else if (typeof window.draw === "function") window.draw();
+            else if (typeof window.setup === "function") window.setup();
+          } catch (e) {
+            console.error("saveSVG: draw/setup invocation error", e);
+          }
+        }
+
+        // If setup/INIT created a new svg element and appended it to the DOM,
+        // capture it so we can use it and later remove it to avoid side-effects.
+        try {
+          if (window.svgElmt && window.svgElmt !== temp) {
+            createdSvg = window.svgElmt;
+          }
+        } catch (e) {
+          /* ignore */
+        }
+
+        // Return the shapes and the SVG node that was populated.
+        if (createdSvg)
+          return {
+            shapes: createdSvg.querySelectorAll("polyline,polygon"),
+            svg: createdSvg,
+          };
+        return { shapes: temp.querySelectorAll("polyline,polygon"), svg: temp };
+      } finally {
+        // restore create/noCanvas and svg color/refs
+        try {
+          if (prev2.noCanvas) window.noCanvas = prev2.noCanvas;
+          else delete window.noCanvas;
+        } catch (e) {
+          /* ignore */
+        }
+        try {
+          if (prev2.createCanvas) window.createCanvas = prev2.createCanvas;
+          else delete window.createCanvas;
+        } catch (e) {
+          /* ignore */
+        }
+        window.svgStrokeColor = prev2.svgStrokeColor;
+        // keep prev svgElmt/_SVG_ restored
+        window.svgElmt = prev2.svgElmt;
+        window._SVG_ = prev2._SVG_;
+
+        // Remove any temporary SVG element that setup appended to the DOM
+        try {
+          if (createdSvg && createdSvg.parentNode && !prev2.svgElmt) {
+            // remove it to avoid leaving duplicate DOM nodes
+            createdSvg.parentNode.removeChild(createdSvg);
+          }
+        } catch (e) {
+          console.error("saveSVG: failed to remove temporary svgElmt", e);
+        }
+      }
+    };
+
     const temp = ensureTempSvg(np);
+    const populated = tryPopulateSvg(temp);
+    // populated: { shapes: NodeList, svg: SVGElement }
+    let shapes = populated && populated.shapes ? populated.shapes : null;
+    let exportSvg = populated && populated.svg ? populated.svg : temp;
+
+    // If setup/draw created its own svgElmt and populated it, prefer that one.
+    try {
+      if (window.svgElmt && window.svgElmt !== temp) {
+        const liveShapes = window.svgElmt.querySelectorAll("polyline,polygon");
+        if (liveShapes && liveShapes.length) {
+          shapes = liveShapes;
+          exportSvg = window.svgElmt;
+        }
+      }
+    } catch (e) {
+      console.error("saveSVG: error checking live svgElmt", e);
+    }
+
+    // If we obtained shapes, normalize, replace the canvas with the SVG,
+    // and export the SVG without the background rect.
+    if (shapes && shapes.length) {
+      try {
+        // determine stroke color: prefer canvas stroke, then svgStrokeColor, then STROKE_COLOR
+        const rawColor =
+          canvasColors.strokeStyle ||
+          window.svgStrokeColor ||
+          window.STROKE_COLOR;
+        const strokeColor = normalizeColor(rawColor) || rawColor;
+
+        shapes.forEach((n) => {
+          const stroke = n.getAttribute("stroke");
+          if (!stroke || stroke === "null" || stroke === "undefined") {
+            if (strokeColor) n.setAttribute("stroke", strokeColor);
+          } else {
+            // normalize existing stroke string if possible
+            const norm = normalizeColor(stroke);
+            if (norm) n.setAttribute("stroke", norm);
+          }
+          if (!n.getAttribute("fill")) n.setAttribute("fill", "none");
+        });
+      } catch (e) {
+        console.error("saveSVG: error normalizing traced svgElmt", e);
+      }
+
+      try {
+        // Prepare an export clone (no background) to download, and a page clone
+        // to replace the canvas in-place.
+        const exportClone = exportSvg.cloneNode(true);
+        try {
+          const bgRect = exportClone.querySelector("rect");
+          if (bgRect) bgRect.parentNode.removeChild(bgRect);
+        } catch (e) {
+          /* ignore */
+        }
+
+        // Ensure exported SVG has explicit width/height matching the canvas
+        const canvasEl = getCanvas();
+        if (canvasEl) {
+          const w =
+            canvasEl.width ||
+            Math.round(canvasEl.getBoundingClientRect().width);
+          const h =
+            canvasEl.height ||
+            Math.round(canvasEl.getBoundingClientRect().height);
+          if (w) exportClone.setAttribute("width", String(w));
+          if (h) exportClone.setAttribute("height", String(h));
+          // set viewBox to match intrinsic pixel size so scaling is correct
+          if (w && h) exportClone.setAttribute("viewBox", `0 0 ${w} ${h}`);
+        }
+        // remove any inline style that could add background or sizing
+        try {
+          exportClone.removeAttribute("style");
+        } catch (e) {}
+
+        // Replace the canvas on the page with a visual SVG (same size)
+        try {
+          const pageSvg = exportClone.cloneNode(true);
+          pageSvg.id = "export-svg-overlay";
+          // style reset: make it fill the original canvas element slot
+          pageSvg.style.display = "block";
+          // match the canvas CSS size so layout is preserved
+          const r = canvasEl ? canvasEl.getBoundingClientRect() : null;
+          if (r) {
+            pageSvg.style.width = `${Math.round(r.width * 2)}px`;
+            pageSvg.style.height = `${Math.round(r.height * 2)}px`;
+          } else {
+            pageSvg.style.width = pageSvg.getAttribute("width") || "100%";
+            pageSvg.style.height = pageSvg.getAttribute("height") || "100%";
+          }
+
+          if (canvasEl && canvasEl.parentNode) {
+            canvasEl.parentNode.replaceChild(pageSvg, canvasEl);
+          }
+        } catch (e) {
+          console.error("saveSVG: replace canvas with svg failed", e);
+        }
+
+        // Trigger download using the cleaned exportClone
+        dl(
+          name || "sketch.svg",
+          serializeSvg(exportClone),
+          "image/svg+xml;charset=utf-8"
+        );
+      } catch (e) {
+        console.error("saveSVG: export/replace error", e);
+      }
+      return;
+    }
+
+    // Fallback: embed raster canvas into an SVG
     const canvasBg =
       (canvasColors && canvasColors.bg) || window.BG_COLOR || "#ffffff";
     try {
@@ -184,32 +480,79 @@ function saveDXF(name) {
   if (window.svgElmt) shapes = extractPolylines(window.svgElmt);
 
   if (!shapes.length) {
-    // Try to produce an SVG by running the sketch in SVG mode
-    const prev = { svgElmt: window.svgElmt, _SVG_: window._SVG_ };
+    // Try to produce an SVG by replaying output or running the sketch
+    const prev = {
+      svgElmt: window.svgElmt,
+      _SVG_: window._SVG_,
+      noCanvas: window.noCanvas,
+      createCanvas: window.createCanvas,
+    };
     try {
-      // Turn on SVG mode and create a temporary svg element.
-      // Many sketches record drawing output commands in `OUTPUT` and
-      // provide a `TRACE2()` helper (from `init_trace.js`) that will
-      // replay `OUTPUT` into the current `svgElmt`. Call it so the
-      // temporary SVG is actually populated with polylines/polygons.
       window._SVG_ = true;
       const temp = ensureTempSvg(np);
       window.svgElmt = temp;
       if (!window.svgTranslate) window.svgTranslate = { x: 0, y: 0 };
 
-      // If TRACE2 is available (init_trace.js), use it to populate
-      // the temporary svg from the recorded `OUTPUT` commands.
+      // prevent canvas removal during INIT/setup
       try {
-        if (typeof TRACE2 === "function") {
-          TRACE2();
-        }
+        window.noCanvas = function () {};
+        window.createCanvas = function (w, h) {
+          return document.querySelector("canvas") || null;
+        };
+      } catch (e) {
+        /* ignore */
+      }
+
+      // ensure svg stroke color is a normalized string
+      try {
+        const cs = getCanvasColors();
+        const candidate =
+          (cs && cs.strokeStyle) ||
+          window.STROKE_COLOR ||
+          window.svgStrokeColor;
+        const norm = normalizeColor(candidate) || candidate;
+        if (norm) window.svgStrokeColor = norm;
+      } catch (e) {
+        /* ignore */
+      }
+
+      try {
+        if (typeof TRACE2 === "function") TRACE2();
       } catch (e) {
         console.error("saveDXF: TRACE2 playback error", e);
       }
 
-      // Now extract polylines/polygons from the populated temp svg
-      shapes = extractPolylines(temp);
+      // If TRACE2 didn't produce shapes, try draw_/draw/setup
+      let shapesFound = temp.querySelectorAll("polyline,polygon");
+      if (!shapesFound || shapesFound.length === 0) {
+        try {
+          if (typeof window.draw_ === "function") window.draw_();
+          else if (typeof window.draw === "function") window.draw();
+          else if (typeof window.setup === "function") window.setup();
+        } catch (e) {
+          console.error("saveDXF: draw/setup invocation error", e);
+        }
+      }
+
+      // Prefer any svgElmt that the sketch may have created during setup/draw
+      try {
+        if (window.svgElmt && window.svgElmt !== temp) {
+          shapes = extractPolylines(window.svgElmt);
+        } else {
+          shapes = extractPolylines(temp);
+        }
+      } catch (e) {
+        shapes = extractPolylines(temp);
+      }
     } finally {
+      try {
+        if (prev.noCanvas) window.noCanvas = prev.noCanvas;
+        else delete window.noCanvas;
+      } catch (e) {}
+      try {
+        if (prev.createCanvas) window.createCanvas = prev.createCanvas;
+        else delete window.createCanvas;
+      } catch (e) {}
       window.svgElmt = prev.svgElmt;
       window._SVG_ = prev._SVG_;
     }

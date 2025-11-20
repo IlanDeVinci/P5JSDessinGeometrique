@@ -62,11 +62,38 @@ function serializeSvg(node) {
   return preface + new XMLSerializer().serializeToString(node);
 }
 
+// Convert HSB to RGB (H: 0-360, S: 0-100, B: 0-100)
+function hsbToRgb(h, s, b) {
+  s = s / 100;
+  b = b / 100;
+  const k = (n) => (n + h / 60) % 6;
+  const f = (n) => b * (1 - s * Math.max(0, Math.min(k(n), 4 - k(n), 1)));
+  return [
+    Math.round(255 * f(5)),
+    Math.round(255 * f(3)),
+    Math.round(255 * f(1)),
+  ];
+}
+
 // Normalize various color inputs to an SVG-friendly string.
-// Accepts arrays like [r,g,b], hex strings, or CSS `rgb(...)`/`rgba(...)`.
+// Accepts arrays like [h,s,b] (HSB), [r,g,b] (RGB), hex strings, or CSS `rgb(...)`/`rgba(...)`.
 function normalizeColor(c) {
   if (!c && c !== 0) return null;
   if (Array.isArray(c)) {
+    // Detect if HSB or RGB based on value ranges
+    // HSB: h can be 0-360, s and b are 0-100
+    // RGB: all values are 0-255
+    // If second or third value > 100, it's RGB (since S and B in HSB are max 100)
+    const [v1, v2, v3] = c;
+    const looksLikeRGB = v2 > 100 || v3 > 100;
+
+    if (window._EXPORT_HSB_MODE_ && !looksLikeRGB) {
+      // Treat as HSB
+      const [h, s, b] = c;
+      const [r, g, b2] = hsbToRgb(h, s, b);
+      return `rgb(${r},${g},${b2})`;
+    }
+    // Treat as RGB
     const [r, g, b] = c.map((v) =>
       Math.max(0, Math.min(255, parseInt(v) || 0))
     );
@@ -231,17 +258,16 @@ function saveSVG(name) {
         /* ignore background rect manipulation errors */
       }
       try {
-        const shapes = temp.querySelectorAll("polyline,polygon");
+        const shapes = temp.querySelectorAll("polyline,polygon,line,path");
         const defaultStroke =
           normalizeColor(canvasColors.strokeStyle) || canvasColors.strokeStyle;
         shapes.forEach((n) => {
           const stroke = n.getAttribute("stroke");
+          // Only set default if stroke is missing or invalid - preserve existing colors!
           if (!stroke || stroke === "null" || stroke === "undefined") {
             if (defaultStroke) n.setAttribute("stroke", defaultStroke);
-          } else {
-            const norm = normalizeColor(stroke);
-            if (norm) n.setAttribute("stroke", norm);
           }
+          // Don't normalize existing valid strokes - they may be intentional rainbow colors
           if (!n.getAttribute("fill")) n.setAttribute("fill", "none");
         });
       } catch (e) {
@@ -273,12 +299,23 @@ function saveSVG(name) {
         noCanvas: window.noCanvas,
         createCanvas: window.createCanvas,
         svgStrokeColor: window.svgStrokeColor,
+        svgStrokeWeight: window.svgStrokeWeight,
+        stroke_: window.stroke_,
+        line: window.line,
+        arc: window.arc,
+        strokeWeight: window.strokeWeight,
+        colorMode: window.colorMode,
+        _EXPORT_HSB_MODE_: window._EXPORT_HSB_MODE_,
       };
       let createdSvg = null;
+      let currentStrokeColor = window.svgStrokeColor || "#000000";
+      let currentStrokeWeight = window.svgStrokeWeight || 1;
+
       try {
         // Force SVG mode and root to our temporary svg while invoking sketch code.
         window._SVG_ = true;
         window.svgElmt = temp;
+        window._EXPORT_HSB_MODE_ = false; // Will be set to true if colorMode(HSB) is called
         if (!window.svgTranslate) window.svgTranslate = { x: 0, y: 0 };
 
         // Prevent the sketch from removing the existing canvas when it calls
@@ -293,6 +330,84 @@ function saveSVG(name) {
         } catch (e) {
           console.error("saveSVG: error patching noCanvas/createCanvas", e);
         }
+
+        // Intercept colorMode() to detect HSB mode
+        window.colorMode = function (mode) {
+          if (mode === HSB || mode === "HSB") {
+            window._EXPORT_HSB_MODE_ = true;
+          }
+          // Don't actually call p5's colorMode in SVG mode to avoid errors
+        };
+
+        // Intercept stroke_() to capture HSB color arrays and convert them
+        const origStroke_ = window.stroke_;
+        if (origStroke_) {
+          window.stroke_ = function (color) {
+            if (Array.isArray(color)) {
+              currentStrokeColor = normalizeColor(color);
+              window.svgStrokeColor = currentStrokeColor;
+            } else {
+              currentStrokeColor = color;
+              window.svgStrokeColor = color;
+            }
+            // Don't call original in SVG mode to avoid errors
+            if (!window._SVG_) origStroke_.call(this, color);
+          };
+        }
+
+        // Intercept strokeWeight() to track stroke width
+        window.strokeWeight = function (weight) {
+          currentStrokeWeight = weight;
+          window.svgStrokeWeight = weight;
+        };
+
+        // Intercept line() to create SVG line elements
+        window.line = function (x1, y1, x2, y2) {
+          const SVG_NS = "http://www.w3.org/2000/svg";
+          const lineEl = document.createElementNS(SVG_NS, "line");
+          lineEl.setAttribute("x1", x1);
+          lineEl.setAttribute("y1", y1);
+          lineEl.setAttribute("x2", x2);
+          lineEl.setAttribute("y2", y2);
+          lineEl.setAttribute("stroke", currentStrokeColor);
+          lineEl.setAttribute("stroke-width", currentStrokeWeight);
+          lineEl.setAttribute("fill", "none");
+          const translate = window.svgTranslate;
+          if (translate && (translate.x !== 0 || translate.y !== 0)) {
+            lineEl.setAttribute(
+              "transform",
+              `translate(${translate.x} ${translate.y})`
+            );
+          }
+          window.svgElmt.appendChild(lineEl);
+        };
+
+        // Intercept arc() to create SVG path elements
+        window.arc = function (x, y, w, h, start, stop) {
+          const SVG_NS = "http://www.w3.org/2000/svg";
+          const rx = w / 2;
+          const ry = h / 2;
+          const startX = x + rx * Math.cos(start);
+          const startY = y + ry * Math.sin(start);
+          const endX = x + rx * Math.cos(stop);
+          const endY = y + ry * Math.sin(stop);
+          const largeArc = stop - start > Math.PI ? 1 : 0;
+
+          const pathEl = document.createElementNS(SVG_NS, "path");
+          const d = `M ${startX} ${startY} A ${rx} ${ry} 0 ${largeArc} 1 ${endX} ${endY}`;
+          pathEl.setAttribute("d", d);
+          pathEl.setAttribute("stroke", currentStrokeColor);
+          pathEl.setAttribute("stroke-width", currentStrokeWeight);
+          pathEl.setAttribute("fill", "none");
+          const translate = window.svgTranslate;
+          if (translate && (translate.x !== 0 || translate.y !== 0)) {
+            pathEl.setAttribute(
+              "transform",
+              `translate(${translate.x} ${translate.y})`
+            );
+          }
+          window.svgElmt.appendChild(pathEl);
+        };
 
         // Ensure INIT / INIT2 used by sketches will create SVGs attached to
         // our temporary mode (or at least create an svg we can capture).
@@ -347,7 +462,7 @@ function saveSVG(name) {
 
         // 2) If nothing was produced, try calling common drawing entrypoints
         // that sketches may define. Call in order: draw_(), draw(), setup().
-        let shapes = temp.querySelectorAll("polyline,polygon");
+        let shapes = temp.querySelectorAll("polyline,polygon,line,path");
         if (!shapes || shapes.length === 0) {
           try {
             if (typeof window.draw_ === "function") window.draw_();
@@ -371,10 +486,13 @@ function saveSVG(name) {
         // Return the shapes and the SVG node that was populated.
         if (createdSvg)
           return {
-            shapes: createdSvg.querySelectorAll("polyline,polygon"),
+            shapes: createdSvg.querySelectorAll("polyline,polygon,line,path"),
             svg: createdSvg,
           };
-        return { shapes: temp.querySelectorAll("polyline,polygon"), svg: temp };
+        return {
+          shapes: temp.querySelectorAll("polyline,polygon,line,path"),
+          svg: temp,
+        };
       } finally {
         // restore create/noCanvas and svg color/refs
         try {
@@ -389,7 +507,34 @@ function saveSVG(name) {
         } catch (e) {
           /* ignore */
         }
+        try {
+          if (prev2.stroke_) window.stroke_ = prev2.stroke_;
+        } catch (e) {
+          /* ignore */
+        }
+        try {
+          if (prev2.line) window.line = prev2.line;
+        } catch (e) {
+          /* ignore */
+        }
+        try {
+          if (prev2.arc) window.arc = prev2.arc;
+        } catch (e) {
+          /* ignore */
+        }
+        try {
+          if (prev2.strokeWeight) window.strokeWeight = prev2.strokeWeight;
+        } catch (e) {
+          /* ignore */
+        }
+        try {
+          if (prev2.colorMode) window.colorMode = prev2.colorMode;
+        } catch (e) {
+          /* ignore */
+        }
         window.svgStrokeColor = prev2.svgStrokeColor;
+        window.svgStrokeWeight = prev2.svgStrokeWeight;
+        window._EXPORT_HSB_MODE_ = prev2._EXPORT_HSB_MODE_;
         // keep prev svgElmt/_SVG_ restored
         window.svgElmt = prev2.svgElmt;
         window._SVG_ = prev2._SVG_;
@@ -425,7 +570,9 @@ function saveSVG(name) {
     // If setup/draw created its own svgElmt and populated it, prefer that one.
     try {
       if (window.svgElmt && window.svgElmt !== temp) {
-        const liveShapes = window.svgElmt.querySelectorAll("polyline,polygon");
+        const liveShapes = window.svgElmt.querySelectorAll(
+          "polyline,polygon,line,path"
+        );
         if (liveShapes && liveShapes.length) {
           shapes = liveShapes;
           exportSvg = window.svgElmt;
@@ -439,22 +586,19 @@ function saveSVG(name) {
     // and export the SVG without the background rect.
     if (shapes && shapes.length) {
       try {
-        // determine stroke color: prefer canvas stroke, then svgStrokeColor, then STROKE_COLOR
-        const rawColor =
-          canvasColors.strokeStyle ||
-          window.svgStrokeColor ||
-          window.STROKE_COLOR;
-        const strokeColor = normalizeColor(rawColor) || rawColor;
-
+        // Don't override stroke colors that are already set - preserve them!
         shapes.forEach((n) => {
           const stroke = n.getAttribute("stroke");
+          // Only set default stroke if missing or invalid
           if (!stroke || stroke === "null" || stroke === "undefined") {
+            const rawColor =
+              canvasColors.strokeStyle ||
+              window.svgStrokeColor ||
+              window.STROKE_COLOR;
+            const strokeColor = normalizeColor(rawColor) || rawColor;
             if (strokeColor) n.setAttribute("stroke", strokeColor);
-          } else {
-            // normalize existing stroke string if possible
-            const norm = normalizeColor(stroke);
-            if (norm) n.setAttribute("stroke", norm);
           }
+          // Ensure fill is none if not set
           if (!n.getAttribute("fill")) n.setAttribute("fill", "none");
         });
       } catch (e) {
@@ -554,12 +698,14 @@ function saveSVG(name) {
   }
 }
 
-// Extract arrays of point pairs from polyline/polygon `points` attributes
+// Extract arrays of point pairs from polyline/polygon/line/path elements
 function extractPolylines(svgNode) {
   const out = [];
   if (!svgNode || !svgNode.querySelectorAll) return out;
-  const nodes = svgNode.querySelectorAll("polyline,polygon");
-  nodes.forEach((n) => {
+
+  // Handle polyline and polygon elements
+  const polyNodes = svgNode.querySelectorAll("polyline,polygon");
+  polyNodes.forEach((n) => {
     const pts = (n.getAttribute("points") || "")
       .trim()
       .split(/\s+/)
@@ -570,6 +716,42 @@ function extractPolylines(svgNode) {
       .filter(Boolean);
     if (pts.length) out.push(pts);
   });
+
+  // Handle line elements - convert to 2-point polyline
+  const lineNodes = svgNode.querySelectorAll("line");
+  lineNodes.forEach((n) => {
+    const x1 = parseFloat(n.getAttribute("x1"));
+    const y1 = parseFloat(n.getAttribute("y1"));
+    const x2 = parseFloat(n.getAttribute("x2"));
+    const y2 = parseFloat(n.getAttribute("y2"));
+    if (!isNaN(x1) && !isNaN(y1) && !isNaN(x2) && !isNaN(y2)) {
+      out.push([
+        [x1, y1],
+        [x2, y2],
+      ]);
+    }
+  });
+
+  // Handle path elements - extract arc paths (simplified)
+  const pathNodes = svgNode.querySelectorAll("path");
+  pathNodes.forEach((n) => {
+    const d = n.getAttribute("d");
+    if (!d) return;
+    // Simple extraction of M and A commands for arcs
+    // This is a basic approximation - arcs are converted to line segments
+    const pts = [];
+    const matches = d.match(/[ML]\s*([0-9.-]+)\s+([0-9.-]+)/g);
+    if (matches) {
+      matches.forEach((match) => {
+        const coords = match.match(/([0-9.-]+)\s+([0-9.-]+)/);
+        if (coords && coords.length >= 3) {
+          pts.push([parseFloat(coords[1]), parseFloat(coords[2])]);
+        }
+      });
+    }
+    if (pts.length) out.push(pts);
+  });
+
   return out;
 }
 
@@ -585,11 +767,24 @@ function saveDXF(name) {
       _SVG_: window._SVG_,
       noCanvas: window.noCanvas,
       createCanvas: window.createCanvas,
+      svgStrokeColor: window.svgStrokeColor,
+      svgStrokeWeight: window.svgStrokeWeight,
+      stroke_: window.stroke_,
+      line: window.line,
+      arc: window.arc,
+      strokeWeight: window.strokeWeight,
+      colorMode: window.colorMode,
+      _EXPORT_HSB_MODE_: window._EXPORT_HSB_MODE_,
     };
+    let currentStrokeColor = window.svgStrokeColor || "#000000";
+    let currentStrokeWeight = window.svgStrokeWeight || 1;
+    let createdSvg = null;
+
     try {
       window._SVG_ = true;
       const temp = ensureTempSvg(np);
       window.svgElmt = temp;
+      window._EXPORT_HSB_MODE_ = false; // Will be set to true if colorMode(HSB) is called
       if (!window.svgTranslate) window.svgTranslate = { x: 0, y: 0 };
 
       // prevent canvas removal during INIT/setup
@@ -602,18 +797,82 @@ function saveDXF(name) {
         /* ignore */
       }
 
-      // ensure svg stroke color is a normalized string
-      try {
-        const cs = getCanvasColors();
-        const candidate =
-          (cs && cs.strokeStyle) ||
-          window.STROKE_COLOR ||
-          window.svgStrokeColor;
-        const norm = normalizeColor(candidate) || candidate;
-        if (norm) window.svgStrokeColor = norm;
-      } catch (e) {
-        /* ignore */
+      // Intercept colorMode() to detect HSB mode
+      window.colorMode = function (mode) {
+        if (mode === HSB || mode === "HSB") {
+          window._EXPORT_HSB_MODE_ = true;
+        }
+        // Don't actually call p5's colorMode in SVG mode to avoid errors
+      };
+
+      // Intercept stroke_() to capture HSB color arrays and convert them
+      const origStroke_ = window.stroke_;
+      if (origStroke_) {
+        window.stroke_ = function (color) {
+          if (Array.isArray(color)) {
+            currentStrokeColor = normalizeColor(color);
+            window.svgStrokeColor = currentStrokeColor;
+          } else {
+            currentStrokeColor = color;
+            window.svgStrokeColor = color;
+          }
+          if (!window._SVG_) origStroke_.call(this, color);
+        };
       }
+
+      // Intercept strokeWeight() to track stroke width
+      window.strokeWeight = function (weight) {
+        currentStrokeWeight = weight;
+        window.svgStrokeWeight = weight;
+      };
+
+      // Intercept line() to create SVG line elements
+      window.line = function (x1, y1, x2, y2) {
+        const SVG_NS = "http://www.w3.org/2000/svg";
+        const lineEl = document.createElementNS(SVG_NS, "line");
+        lineEl.setAttribute("x1", x1);
+        lineEl.setAttribute("y1", y1);
+        lineEl.setAttribute("x2", x2);
+        lineEl.setAttribute("y2", y2);
+        lineEl.setAttribute("stroke", currentStrokeColor);
+        lineEl.setAttribute("stroke-width", currentStrokeWeight);
+        lineEl.setAttribute("fill", "none");
+        const translate = window.svgTranslate;
+        if (translate && (translate.x !== 0 || translate.y !== 0)) {
+          lineEl.setAttribute(
+            "transform",
+            `translate(${translate.x} ${translate.y})`
+          );
+        }
+        window.svgElmt.appendChild(lineEl);
+      };
+
+      // Intercept arc() to create SVG path elements
+      window.arc = function (x, y, w, h, start, stop) {
+        const SVG_NS = "http://www.w3.org/2000/svg";
+        const rx = w / 2;
+        const ry = h / 2;
+        const startX = x + rx * Math.cos(start);
+        const startY = y + ry * Math.sin(start);
+        const endX = x + rx * Math.cos(stop);
+        const endY = y + ry * Math.sin(stop);
+        const largeArc = stop - start > Math.PI ? 1 : 0;
+
+        const pathEl = document.createElementNS(SVG_NS, "path");
+        const d = `M ${startX} ${startY} A ${rx} ${ry} 0 ${largeArc} 1 ${endX} ${endY}`;
+        pathEl.setAttribute("d", d);
+        pathEl.setAttribute("stroke", currentStrokeColor);
+        pathEl.setAttribute("stroke-width", currentStrokeWeight);
+        pathEl.setAttribute("fill", "none");
+        const translate = window.svgTranslate;
+        if (translate && (translate.x !== 0 || translate.y !== 0)) {
+          pathEl.setAttribute(
+            "transform",
+            `translate(${translate.x} ${translate.y})`
+          );
+        }
+        window.svgElmt.appendChild(pathEl);
+      };
 
       try {
         if (typeof TRACE2 === "function") TRACE2();
@@ -622,7 +881,7 @@ function saveDXF(name) {
       }
 
       // If TRACE2 didn't produce shapes, try draw_/draw/setup
-      let shapesFound = temp.querySelectorAll("polyline,polygon");
+      let shapesFound = temp.querySelectorAll("polyline,polygon,line,path");
       if (!shapesFound || shapesFound.length === 0) {
         try {
           if (typeof window.draw_ === "function") window.draw_();
@@ -636,6 +895,7 @@ function saveDXF(name) {
       // Prefer any svgElmt that the sketch may have created during setup/draw
       try {
         if (window.svgElmt && window.svgElmt !== temp) {
+          createdSvg = window.svgElmt;
           shapes = extractPolylines(window.svgElmt);
         } else {
           shapes = extractPolylines(temp);
@@ -652,8 +912,35 @@ function saveDXF(name) {
         if (prev.createCanvas) window.createCanvas = prev.createCanvas;
         else delete window.createCanvas;
       } catch (e) {}
+      try {
+        if (prev.stroke_) window.stroke_ = prev.stroke_;
+      } catch (e) {}
+      try {
+        if (prev.line) window.line = prev.line;
+      } catch (e) {}
+      try {
+        if (prev.arc) window.arc = prev.arc;
+      } catch (e) {}
+      try {
+        if (prev.strokeWeight) window.strokeWeight = prev.strokeWeight;
+      } catch (e) {}
+      try {
+        if (prev.colorMode) window.colorMode = prev.colorMode;
+      } catch (e) {}
+      window.svgStrokeColor = prev.svgStrokeColor;
+      window.svgStrokeWeight = prev.svgStrokeWeight;
+      window._EXPORT_HSB_MODE_ = prev._EXPORT_HSB_MODE_;
       window.svgElmt = prev.svgElmt;
       window._SVG_ = prev._SVG_;
+
+      // Remove any temporary SVG element that setup appended to the DOM
+      try {
+        if (createdSvg && createdSvg.parentNode && !prev.svgElmt) {
+          createdSvg.parentNode.removeChild(createdSvg);
+        }
+      } catch (e) {
+        console.error("saveDXF: failed to remove temporary svgElmt", e);
+      }
     }
   }
 
